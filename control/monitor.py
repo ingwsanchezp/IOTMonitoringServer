@@ -2,6 +2,7 @@ from argparse import ArgumentError
 import ssl
 from django.db.models import Avg
 from datetime import timedelta, datetime
+from control.sendmail import send_mail
 from receiver.models import Data, Measurement
 import paho.mqtt.client as mqtt
 import schedule
@@ -10,6 +11,37 @@ from django.conf import settings
 
 client = mqtt.Client(settings.MQTT_USER_PUB)
 
+def analyze_temp():
+    print("alertando puntos")
+    data = Data.objects.filter(base_time__gte=datetime.now() - timedelta(hours=1))
+    aggregation = data.annotate(check_value=Avg('avg_value')) \
+    .select_related('station', 'measurement') \
+    .select_related('station__user') \
+    .values('check_value', 'station__user__username',
+                    'measurement__name',
+                    'measurement__max_value',
+                    'measurement__min_value')
+    sms = 0
+    for item in aggregation:
+        alert = False
+
+        variable = item["measurement__name"]
+        max_value = item["measurement__max_value"] or 0
+        min_value = item["measurement__min_value"] or 0
+
+        user = item['station__user__username']
+
+        if item["check_value"] <= 0:
+            alert = True
+
+        if alert:
+            message = "ALERT {} {} {}".format(variable, min_value, max_value)
+            topic = '{}/{}/{}/{}/in'.format(user)
+            print(datetime.now(), "Sending alert to {} {}".format(topic, variable))
+            client.publish(topic, message)
+            sms += 1
+            send_mail(user, 'adminadmin')
+    print(sms, "alertas enviadas")
 
 def analyze_data():
     # Consulta todos los datos de la última hora, los agrupa por estación y variable
@@ -106,6 +138,7 @@ def start_cron():
     '''
     print("Iniciando cron...")
     schedule.every(5).minutes.do(analyze_data)
+    schedule.every(5).minutes.do(analyze_temp)
     print("Servicio de control iniciado")
     while 1:
         schedule.run_pending()
